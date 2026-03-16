@@ -6,7 +6,7 @@ pub struct PoolCreationError;
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: Option<mpsc::Sender<Job>>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -40,7 +40,7 @@ impl ThreadPool {
             workers.push(Worker::new(worker_id, Arc::clone(&receiver)));
         }
 
-        Ok(ThreadPool { workers, sender })
+        Ok(ThreadPool { workers, sender: Some(sender) })
     }
 
     pub fn execute<F>(&self, closure: F)
@@ -49,7 +49,22 @@ impl ThreadPool {
     {
         let job = Box::new(closure);
 
-        self.sender.send(job).expect("Failed to send job to worker threads!");
+        self.sender
+            .as_ref()
+            .expect("Failed to get reference of Threadpool sender!")
+            .send(job)
+            .expect("Failed to send job to worker threads!");
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in self.workers.drain(..) {
+            println!("Shutting down worker {}", worker.id);
+            worker.thread.join().expect("Failed to join worker thread!")
+        }
     }
 }
 
@@ -66,15 +81,23 @@ impl Worker {
     fn new(id: usize, receiver:  Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                let job = receiver
+                let message = receiver
                     .lock()
                     .expect("Mutex is in poisoned state!")
-                    .recv()
-                    .expect("Failed to receive job!");
+                    .recv();
 
-                println!("Worker {id} got a job; executing.");
+                match message {
+                    Ok(job) => {
+                        println!("Worker {id} got a job; executing.");
 
-                job();
+                        job();
+                    }
+                    Err(_) => {
+                        println!("Worker {id} disconnected; shutting down.");
+                        break;
+                    }
+                }
+
             }
         });
 
